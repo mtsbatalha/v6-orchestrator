@@ -1,0 +1,163 @@
+coordinator:
+  archive_after_days: 7
+  heartbeat_timeout_seconds: 300
+  log_path: /opt/v6-orchestrator/logs/coordinator.log
+  max_retries: 3
+  queue_path: /opt/v6-orchestrator/queue.json
+  report_interval_seconds: 300
+  scan_interval_seconds: 1800
+  workers_path: /opt/v6-orchestrator/workers.json
+encode_defaults:
+  audio_copy: true
+  disk_cleanup_pct: 85
+  min_size_gb: 20
+  subtitle_copy: true
+sources:
+- folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  name: seedbox-pve21
+  remote: seedbox
+  type: webdav
+- folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  - ANIMES - LEGENDADOS - REMUX
+  - FILMES BDR - DUBLADOS
+  - FILMES BDR - LEGENDADOS
+  name: seedbox-pve7
+  remote: pve7-webdav
+  type: webdav
+- canonical_source: seedbox-pve7
+  folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  - FILMES BDR - DUBLADOS
+  - FILMES BDR - LEGENDADOS
+  name: gorilla-pve7-smb
+  remote: pve7-smb:/mnt/internal
+  type: local
+- canonical_source: seedbox-pve21
+  folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  - FILMES BDR - DUBLADOS
+  - FILMES BDR - LEGENDADOS
+  name: gorilla-pve21-smb
+  remote: pve21-smb:/mnt/hostdzire-pve21
+  type: local
+workers:
+  gorilla:
+    conv_dir: /opt/v6-converter/conversions
+    encoder: vaapi
+    gpu: uhd-p630
+    host: 104.250.135.122
+    profiles:
+      1080p_sdr:
+        codec: h264_vaapi
+        format: nv12
+        mode: qp
+        qp: 22
+        target_gb: 7
+      2160p_hdr:
+        codec: hevc_vaapi
+        format: nv12
+        mode: qp
+        qp: 26
+        target_gb: 14
+    source_remotes:
+      gorilla-pve21-smb: /mnt/hostdzire-pve21
+      gorilla-pve7-smb: /mnt/internal
+      seedbox-pve21: /mnt/hostdzire-pve21
+      seedbox-pve7: /mnt/internal
+    ssh_pass: <YOUR_PASSWORD>
+    ssh_port: 22
+    ssh_user: root
+    temp_dir: /opt/v6-converter/temp
+    upload_dest_base: conversoes_gorilla
+    upload_dest_remote: /mnt/internal
+    workdir: /opt/v6-orchestrator
+  pve14:
+    conv_dir: /opt/v6-converter/conversions
+    encoder: vaapi
+    gpu: xeon-e2288g
+    host: 152.228.132.75
+    profiles:
+      1080p_sdr:
+        codec: h264_vaapi
+        format: nv12
+        mode: qp
+        qp: 22
+        target_gb: 7
+      2160p_hdr:
+        codec: hevc_vaapi
+        format: nv12
+        mode: qp
+        qp: 26
+        target_gb: 14
+    source_remotes:
+      seedbox-pve21: seedbox-pve21
+      seedbox-pve7: seedbox-pve7
+    ssh_pass: <YOUR_PASSWORD>
+    ssh_port: 22
+    ssh_user: root
+    temp_dir: /opt/v6-converter/temp
+    upload_dest_base: conversoes_pve14
+    upload_dest_remote: /mnt/internal
+    workdir: /opt/v6-orchestrator
+  pve24:
+    conv_dir: /opt/v6-converter/conversions
+    encoder: vaapi
+    gpu: uhd-p630
+    host: 51.210.32.216
+    profiles:
+      1080p_sdr:
+        codec: h264_vaapi
+        format: nv12
+        mode: qp
+        qp: 22
+        target_gb: 7
+      2160p_hdr:
+        codec: hevc_vaapi
+        format: nv12
+        mode: qp
+        qp: 26
+        target_gb: 14
+    source_remotes:
+      seedbox-pve21: seedbox-pve21
+      seedbox-pve7: seedbox-pve7
+    ssh_pass: <YOUR_PASSWORD>
+    ssh_port: 22
+    ssh_user: root
+    temp_dir: /opt/v6-converter/temp
+    upload_dest_base: conversoes_pve24
+    upload_dest_remote: gorilla
+    workdir: /opt/v6-orchestrator
+  solidvps:
+    conv_dir: /opt/v6-converter/conversions
+    encoder: nvenc
+    gpu: p1000
+    host: 38.70.138.179
+    profiles:
+      1080p_sdr:
+        codec: hevc_nvenc
+        cq: 22
+        format: nv12
+        mode: cq
+        target_gb: 7
+      2160p_hdr:
+        codec: hevc_nvenc
+        cq: 26
+        format: nv12
+        mode: cq
+        target_gb: 14
+    source_remotes:
+      seedbox-pve21: seedbox
+      seedbox-pve7: pve7-webdav
+    ssh_pass: <YOUR_PASSWORD>
+    ssh_port: 22
+    ssh_user: root
+    temp_dir: /opt/v6-converter/temp
+    upload_dest_base: conversoes_solidvps
+    upload_dest_remote: seedbox
+    workdir: /opt/v6-orchestrator

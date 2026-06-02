@@ -1,0 +1,12 @@
+*.log
+*.json
+config.yaml
+!config.template.yaml
+__pycache__/
+*.pyc
+falhas/
+temp/
+conversions/
+work_order*.json
+work_progress.json
+workers.json
