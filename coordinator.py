@@ -531,15 +531,23 @@ def collect_results(cfg, logger):
             for item in queue.get("items", []):
                 if item["id"] == item_id:
                     if new_status == "done":
+                        # Always accept done — first successful completion wins
                         item["status"] = "done"
                         item["completed_at"] = datetime.now(timezone.utc).isoformat()
                         item["output_path"] = status.get("output_path", "")
+                        item["error"] = None
                         logger.info(f"  ✅ {worker_id}: {item['title'][:80]}")
                     elif new_status == "failed":
-                        item["status"] = "failed"
-                        item["error"] = status.get("error", "")
-                        item["retry_count"] = item.get("retry_count", 0) + 1
-                        logger.warning(f"  ❌ {worker_id}: {item['title'][:80]} — {status.get('error', '')[:100]}")
+                        # NEVER overwrite done or failed_permanent with failed
+                        if item["status"] == "done":
+                            logger.info(f"  ⏭️ {worker_id}: {item['title'][:80]} — failed but already done by another worker, ignoring")
+                        elif item["status"] == "failed_permanent":
+                            logger.debug(f"  ⏭️ {worker_id}: {item['title'][:80]} — failed but already marked permanent, ignoring")
+                        else:
+                            item["status"] = "failed"
+                            item["error"] = status.get("error", "")
+                            item["retry_count"] = item.get("retry_count", 0) + 1
+                            logger.warning(f"  ❌ {worker_id}: {item['title'][:80]} — {status.get('error', '')[:100]}")
                     break
 
             # Clean up the status file on the worker
@@ -661,9 +669,21 @@ def retry_failed_items(cfg, logger):
     lock_fd = lock_queue()
     try:
         queue = load_queue()
+
+        # Build a set of IDs already completed by any worker
+        done_ids = set()
+        for item in queue.get("items", []):
+            if item["status"] == "done":
+                done_ids.add(item["id"])
+
         retried = 0
+        permuted = 0
         for item in queue.get("items", []):
             if item["status"] == "failed" and item.get("retry_count", 0) < max_retries:
+                # Skip if another worker already completed this item
+                if item["id"] in done_ids:
+                    logger.info(f"  ⏭️ Skipping retry for {item['title'][:80]} — already done by another worker")
+                    continue
                 item["status"] = "pending"
                 item["assigned_to"] = None
                 item["assigned_at"] = None
@@ -671,12 +691,20 @@ def retry_failed_items(cfg, logger):
                 retried += 1
                 logger.info(f"  Retrying: {item['title'][:80]}")
             elif item["status"] == "failed" and item.get("retry_count", 0) >= max_retries:
+                # Skip if another worker already completed this item
+                if item["id"] in done_ids:
+                    logger.info(f"  ⏭️ Skipping permanent for {item['title'][:80]} — already done by another worker")
+                    continue
                 item["status"] = "failed_permanent"
+                permuted += 1
                 logger.error(f"  Permanent failure: {item['title'][:80]} (retried {item['retry_count']} times)")
 
         if retried:
             save_queue(queue)
             logger.info(f"Retried {retried} failed items")
+        elif permuted:
+            # Save even if no retries — persist permanent status so we don't re-log
+            save_queue(queue)
     finally:
         unlock_queue(lock_fd)
 
