@@ -102,7 +102,7 @@ DEFAULT_PATTERNS = {
         "match": {"type": "disk_critical"},
         "action": {
             "description": "Limpar arquivos temporários e falhas no worker",
-            "command": "ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 root@{host} 'find /opt/v6-converter/falhas/ -type f -mtime +7 -delete 2>/dev/null; find /opt/v6-converter/temp/ -name \"*.tmp\" -delete 2>/dev/null; du -sh /opt/v6-converter/{falhas,temp,conversions} 2>/dev/null'",
+            "command": "ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 root@{host} 'find /opt/v6-converter/falhas/ -type f -mtime +7 -delete 2>/dev/null; find /opt/v6-converter/temp/ -name \"*.tmp\" -delete 2>/dev/null; du -sh /opt/v6-converter/falhas /opt/v6-converter/temp /opt/v6-converter/conversions 2>/dev/null'",
             "risk": "low",
         },
         "times_matched": 0,
@@ -113,8 +113,21 @@ DEFAULT_PATTERNS = {
         "match": {"type": "recoverable_download_fail"},
         "action": {
             "description": "Reset item para pending (source_remote mismatch corrigido)",
-            "command": "python3 -c \"import json; f='/opt/v6-orchestrator/queue.json'; q=json.load(open(f)); q['items']=[{{**i,'status':'pending','retry_count':0,'error':None,'assigned_to':None}} if i.get('id')=='{{item_id}}' else i for i in q['items']]; json.dump(q,open(f,'w'),indent=2)\"",
+            "command": "python3 -c 'import json;f=\"/opt/v6-orchestrator/queue.json\";q=json.load(open(f));q[\"items\"]=[{{**i,\"status\":\"pending\",\"retry_count\":0,\"error\":None,\"assigned_to\":None}} if i.get(\"id\")==\"{item_id}\" else i for i in q[\"items\"]];json.dump(q,open(f,\"w\"),indent=2)'",
             "risk": "low",
+            "backup_before": True,
+        },
+        "times_matched": 0,
+    },
+    "download_retry_loop": {
+        "key": "download_retry_loop",
+        "type": "download_retry_loop",
+        "match": {"type": "download_retry_loop"},
+        "action": {
+            "description": "Reset item com download_failed para pending (re-dispatch com source_remote correto)",
+            "command": "python3 -c 'import json;f=\"/opt/v6-orchestrator/queue.json\";q=json.load(open(f));q[\"items\"]=[{{**i,\"status\":\"pending\",\"retry_count\":0,\"error\":None,\"assigned_to\":None}} if i.get(\"id\")==\"{item_id}\" else i for i in q[\"items\"]];json.dump(q,open(f,\"w\"),indent=2)'",
+            "risk": "low",
+            "backup_before": True,
         },
         "times_matched": 0,
     },
@@ -327,7 +340,7 @@ def can_auto_execute(action, phase):
         return False, "Phase<4: precisa aprovação para config change"
 
     # 8. Queue.json — allowed if backup flag is set
-    if action_type in ("queue_json_update", "recoverable_download_fail") and action.get("backup_before", False):
+    if action_type in ("queue_json_update", "recoverable_download_fail", "download_retry_loop") and action.get("backup_before", False):
         if phase == "phase4":
             return True, "Fase4: queue.json com backup automático"
         return False, "Phase<4: precisa aprovação"
@@ -667,6 +680,76 @@ def detect_worker_issues(passwords):
     return issues
 
 
+def detect_worker_failed_status():
+    """Check coordinator-report.json for workers stuck in failed phase."""
+    report_path = os.path.join(ORCH_DIR, "logs", "coordinator-report.json")
+    report = load_json_safe(report_path)
+    if not report:
+        return []
+
+    issues = []
+    for wid, winfo in report.get("worker_status", {}).items():
+        phase = winfo.get("current_phase", "")
+        if phase == "failed":
+            detail = winfo.get("current_detail", "")
+            title = winfo.get("current_title", "?")
+            issues.append({
+                "type": "worker_failed",
+                "severity": "warning",
+                "description": f"{wid}: failed em {title[:60]} — {detail[:100]}",
+                "worker": wid,
+                "host": WORKERS.get(wid, ""),
+                "suggested_action": "Verificar source_remote e retry",
+                "command": None,
+                "risk": "none",
+                "phase_required": "phase1",
+            })
+    return issues
+
+
+def detect_download_retry_loop(queue_data):
+    """Detect items stuck in retry loop with download_failed."""
+    if not queue_data:
+        return []
+
+    issues = []
+    for item in queue_data.get("items", []):
+        error = item.get("error", "") or ""
+        if "download_failed" in error and item["status"] in ("dispatched", "failed", "failed_permanent"):
+            retries = item.get("retry_count", 0)
+            title = item.get("title", "?")[:70]
+            assigned = item.get("assigned_to", "?")
+            if item["status"] == "failed_permanent":
+                issues.append({
+                    "type": "download_retry_loop",
+                    "severity": "warning",
+                    "description": f"{title}: download_failed permanent ({retries}/3) em {assigned}",
+                    "worker": assigned,
+                    "host": WORKERS.get(assigned, ""),
+                    "item_id": item.get("id", ""),
+                    "suggested_action": "Reset para pending (re-dispatch com source_remote corrigido)",
+                    "command": None,
+                    "risk": "none",
+                    "phase_required": "phase1",
+                })
+            elif retries >= 1:
+                title = item.get("title", "?")[:70]
+                assigned = item.get("assigned_to", "?")
+                issues.append({
+                    "type": "download_retry_loop",
+                    "severity": "warning",
+                    "description": f"{title}: download_failed retry {retries}/3 em {assigned}",
+                    "worker": assigned,
+                    "host": WORKERS.get(assigned, ""),
+                    "item_id": item.get("id", ""),
+                    "suggested_action": "Verificar source_remote/accessibilidade do source",
+                    "command": None,
+                    "risk": "none",
+                    "phase_required": "phase1",
+                })
+    return issues
+
+
 def detect_queue_anomalies(queue_data):
     """Detect queue-level anomalies."""
     if not queue_data:
@@ -863,6 +946,8 @@ def run():
         detect_coordinator_dead,
         lambda: detect_stale_heartbeats(workers_data),
         lambda: detect_permanent_failures(queue_data),
+        lambda: detect_worker_failed_status(),  # NEW: workers stuck in failed phase
+        lambda: detect_download_retry_loop(queue_data),  # NEW: download retry loops
         detect_report_stale,
         lambda: detect_worker_issues(passwords),  # returns list
         lambda: detect_queue_anomalies(queue_data),  # returns list
@@ -878,8 +963,39 @@ def run():
             else:
                 all_issues.append(result)
 
+    matched_issue_keys = set()  # Track issues consumed by pattern matching
+
     # Classify issues into actions
     for issue in all_issues:
+        # ─── PATTERN MATCHING FIRST (zero LLM cost) ───
+        # Even if risk="none", check for registered patterns first
+        matched, pattern_action = match_known_pattern(issue, patterns)
+        if matched:
+            metrics = bump_metric(metrics, "patterns_matched")
+            action = pattern_action
+            action["diagnosis"] = "Pattern reconhecido — auto-fix"
+            action["llm_info"] = ""
+            can_auto, reason = can_auto_execute(action, WATCHER_MODE)
+            if can_auto:
+                actions_auto.append(action)
+            elif WATCHER_MODE != "phase1":
+                actions_pending.append(action)
+            # Track as consumed — exclude from observations
+            issue_key = f"{issue.get('type', '')}:{issue.get('item_id', '')}:{issue.get('worker', '')}"
+            matched_issue_keys.add(issue_key)
+            # Mark as handled to avoid duplicates
+            state = load_json_safe(STATE_FILE) or {}
+            handled = state.get("handled", [])
+            handled.append({
+                "key": f"{action.get('type', '')}:{action.get('worker', 'global')}:{action.get('item_id', '')}",
+                "at": time.time(),
+                "result": "executed" if can_auto else "pending",
+            })
+            state["handled"] = handled[-20:]
+            save_json(STATE_FILE, state)
+            continue
+
+        # For non-pattern issues, need command + non-none risk to act
         if issue.get("command") and issue.get("suggested_action"):
             # Check if already handled recently
             prev_state = load_json_safe(STATE_FILE) or {}
@@ -894,20 +1010,6 @@ def run():
 
             if issue.get("risk") == "none":
                 continue  # Observation only
-
-            # ─── PATTERN MATCHING (zero LLM cost) ───
-            matched, pattern_action = match_known_pattern(issue, patterns)
-            if matched:
-                metrics = bump_metric(metrics, "patterns_matched")
-                action = pattern_action
-                action["diagnosis"] = "Pattern reconhecido — auto-fix"
-                action["llm_info"] = ""
-                can_auto, reason = can_auto_execute(action, WATCHER_MODE)
-                if can_auto:
-                    actions_auto.append(action)
-                elif WATCHER_MODE != "phase1":
-                    actions_pending.append(action)
-                continue
 
             # ─── LLM FALLBACK (unknown pattern) ───
             context = _collect_context(issue, passwords)
@@ -1017,8 +1119,17 @@ def run():
             "generated_at": time.time(),
         })
 
-    # Observations (no action needed)
-    observations = [i for i in all_issues if i.get("risk") == "none" and i not in [a for a in actions_pending]]
+    # Observations (no action needed) — exclude issues already consumed by pattern matching
+    observations = []
+    for i in all_issues:
+        if i.get("risk") != "none":
+            continue
+        if i in [a for a in actions_pending]:
+            continue
+        issue_key = f"{i.get('type', '')}:{i.get('item_id', '')}:{i.get('worker', '')}"
+        if issue_key in matched_issue_keys:
+            continue  # Already handled by pattern match
+        observations.append(i)
     if observations:
         lines.append("**📋 Observações:**")
         for obs in observations:
