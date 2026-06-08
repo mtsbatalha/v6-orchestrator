@@ -97,6 +97,18 @@ DEFAULT_PATTERNS = {
         },
         "times_matched": 0,
     },
+    "queue_source_remote_mismatch": {
+        "key": "queue_source_remote_mismatch",
+        "type": "queue_source_remote_mismatch",
+        "match": {"type": "queue_source_remote_mismatch"},
+        "action": {
+            "description": "Corrigir source_remote do item e resetar para pending",
+            "command": "python3 /opt/v6-orchestrator/scripts/fix-source-remote.py '{item_id}'",
+            "risk": "low",
+            "backup_before": True,
+        },
+        "times_matched": 0,
+    },
     "tmpfs_high": {
         "key": "tmpfs_high",
         "type": "tmpfs_high",
@@ -352,7 +364,7 @@ def can_auto_execute(action, phase):
         return False, "Phase<4: precisa aprovação para config change"
 
     # 8. Queue.json — allowed if backup flag is set
-    if action_type in ("queue_json_update", "recoverable_download_fail", "download_retry_loop", "coordinator_stale_config") and action.get("backup_before", False):
+    if action_type in ("queue_json_update", "recoverable_download_fail", "download_retry_loop", "coordinator_stale_config", "queue_source_remote_mismatch") and action.get("backup_before", False):
         if phase == "phase4":
             return True, "Fase4: queue.json com backup automático"
         return False, "Phase<4: precisa aprovação"
@@ -767,6 +779,45 @@ def detect_worker_failed_status():
     return issues
 
 
+def detect_queue_source_remote_mismatch(queue_data):
+    """Detect items with local mount paths (/mnt/) assigned to workers that don't have those paths.
+    This happens when items are scanned during config stale period."""
+    if not queue_data:
+        return []
+
+    gorilla_only = ["/mnt/internal", "/mnt/hostdzire"]
+    issues = []
+
+    for item in queue_data.get("items", []):
+        if item["status"] not in ("pending", "dispatched", "failed", "failed_permanent"):
+            continue
+        sr = str(item.get("source_remote", ""))
+        assigned = item.get("assigned_to", "")
+
+        # Skip gorilla itself — it has these mounts
+        if assigned == "gorilla":
+            continue
+
+        for bad in gorilla_only:
+            if bad in sr:
+                title = item.get("title", "?")[:70]
+                issues.append({
+                    "type": "queue_source_remote_mismatch",
+                    "severity": "critical",
+                    "description": f"{title}: source_remote={sr} em {assigned} (path gorilla-only)",
+                    "worker": assigned,
+                    "host": WORKERS.get(assigned, ""),
+                    "item_id": item.get("id", ""),
+                    "suggested_action": "Corrigir source_remote para remote correto do worker",
+                    "command": None,  # Uses script via pattern match
+                    "risk": "none",
+                    "phase_required": "phase1",
+                })
+                break  # Only report once per item
+
+    return issues
+
+
 def detect_download_retry_loop(queue_data):
     """Detect items stuck in retry loop with download_failed."""
     if not queue_data:
@@ -1007,6 +1058,7 @@ def run():
         detect_stale_config,  # NEW: restart if config.yaml newer than coordinator process
         lambda: detect_stale_heartbeats(workers_data),
         lambda: detect_permanent_failures(queue_data),
+        lambda: detect_queue_source_remote_mismatch(queue_data),  # NEW: wrong source_remote paths
         lambda: detect_worker_failed_status(),  # NEW: workers stuck in failed phase
         lambda: detect_download_retry_loop(queue_data),  # NEW: download retry loops
         detect_report_stale,
