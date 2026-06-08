@@ -8,7 +8,7 @@
 
 Persistent registry of known problem patterns → auto-fix (0 tokens). When a new anomaly is detected, LLM diagnoses and saves repeatable patterns to the registry. Over time, more problems auto-fix without LLM calls.
 
-Default patterns: coordinator_dead, coordinator_duplicate, coordinator_stale_config, tmpfs_high, disk_critical, recoverable_download_fail, download_retry_loop.
+Default patterns: coordinator_dead, coordinator_duplicate, coordinator_stale_config, queue_source_remote_mismatch, tmpfs_high, disk_critical, recoverable_download_fail, download_retry_loop.
 
 ### Metrics (`~/.hermes/encode-watcher-metrics.json`)
 
@@ -75,6 +75,7 @@ coordinator.py (intocado)
 | `recoverable_download_fail` | File exists, source_remote mismatch | ✅ Auto-reset with backup |
 | `download_retry_loop` | download_failed (dispatched/failed/failed_permanent), retry ≥ 1 | ✅ Auto-reset with backup |
 | `coordinator_stale_config` | config.yaml mtime > coordinator process age | ✅ Kill+restart coordinator with backup |
+| `queue_source_remote_mismatch` | Items with gorilla-only paths on non-gorilla workers | ✅ Fix source_remote + reset to pending |
 
 ## LLM Integration
 
@@ -177,6 +178,7 @@ Anomaly detected
 | `disk_critical` | Worker disk >92% | Clean old falhas/ and temp |
 | `recoverable_download_fail` | failed_permanent + file exists on correct remote | Reset to pending with backup |
 | `download_retry_loop` | Items with download_failed (dispatched/failed/failed_permanent) with retry_count ≥ 1 | Reset to pending with backup (auto-executes in phase4) |
+| `queue_source_remote_mismatch` | Items with /mnt/internal or /mnt/hostdzire on non-gorilla workers | Fix source_remote + reset to pending with backup |
 
 ### ⚠️ CRITICAL: Pattern matching MUST run BEFORE risk="none" filter (FIXED Jun 2026)
 
