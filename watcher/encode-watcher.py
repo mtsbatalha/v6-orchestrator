@@ -85,6 +85,18 @@ DEFAULT_PATTERNS = {
         },
         "times_matched": 0,
     },
+    "coordinator_stale_config": {
+        "key": "coordinator_stale_config",
+        "type": "coordinator_stale_config",
+        "match": {"type": "coordinator_stale_config"},
+        "action": {
+            "description": "Restart coordinator para carregar config.yaml nova",
+            "command": "pkill -9 -f 'python3 coordinator.py'; sleep 2; cd /opt/v6-orchestrator && python3 -c \"import subprocess; subprocess.Popen(['python3','coordinator.py'], cwd='/opt/v6-orchestrator', stdout=open('/dev/null','w'), stderr=open('/dev/null','w'), start_new_session=True)\"",
+            "risk": "medium",
+            "backup_before": True,
+        },
+        "times_matched": 0,
+    },
     "tmpfs_high": {
         "key": "tmpfs_high",
         "type": "tmpfs_high",
@@ -340,7 +352,7 @@ def can_auto_execute(action, phase):
         return False, "Phase<4: precisa aprovação para config change"
 
     # 8. Queue.json — allowed if backup flag is set
-    if action_type in ("queue_json_update", "recoverable_download_fail", "download_retry_loop") and action.get("backup_before", False):
+    if action_type in ("queue_json_update", "recoverable_download_fail", "download_retry_loop", "coordinator_stale_config") and action.get("backup_before", False):
         if phase == "phase4":
             return True, "Fase4: queue.json com backup automático"
         return False, "Phase<4: precisa aprovação"
@@ -447,6 +459,54 @@ def detect_coordinator_dead():
             "command": f"pkill -9 -f 'python3 coordinator.py'; sleep 2; cd {ORCH_DIR} && python3 -c \"import subprocess; subprocess.Popen(['python3','coordinator.py'], cwd='{ORCH_DIR}', stdout=open('/dev/null','w'), stderr=open('/dev/null','w'), start_new_session=True)\"",
             "risk": "medium",
             "phase_required": "phase2",
+        }
+    return None
+
+
+def detect_stale_config():
+    """Check if config.yaml was modified after the coordinator process started.
+    Coordinator reads config only at startup — a newer config means stale settings."""
+    config_path = os.path.join(ORCH_DIR, "config.yaml")
+    if not os.path.exists(config_path):
+        return None
+
+    # Get coordinator process start time (ELAPSED column = days-HH:MM or HH:MM:SS)
+    r = subprocess.run(
+        "ps -o pid,etime,comm -p $(ps aux | grep 'python3.*coordinator\\.py' | grep -v 'bash\\\\|grep\\\\|awk' | awk '{print $1}' | head -1) 2>/dev/null",
+        shell=True, capture_output=True, text=True
+    )
+    if not r.stdout.strip():
+        return None  # No coordinator running — handled by detect_coordinator_dead
+
+    # Parse elapsed time: could be "MM:SS", "HH:MM:SS", or "DD-HH:MM:SS"
+    elapsed_str = r.stdout.strip().split()[-1]  # last column is etime
+    try:
+        parts = elapsed_str.replace("-", ":").split(":")
+        if len(parts) == 2:
+            proc_age_sec = int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 3:
+            proc_age_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 4:
+            proc_age_sec = int(parts[0]) * 86400 + int(parts[1]) * 3600 + int(parts[2]) * 60 + int(parts[3])
+        else:
+            return None
+    except (ValueError, IndexError):
+        return None
+
+    config_mtime = os.path.getmtime(config_path)
+    config_age_sec = time.time() - config_mtime
+
+    # If config was modified AFTER the coordinator started (with 30s grace buffer)
+    if config_age_sec < proc_age_sec - 30:
+        return {
+            "type": "coordinator_stale_config",
+            "severity": "critical",
+            "description": f"config.yaml modificado há {config_age_sec/60:.0f}min mas coordinator rodando há {proc_age_sec/60:.0f}min — config stale",
+            "suggested_action": "Restart coordinator para carregar config nova",
+            "command": f"pkill -9 -f 'python3 coordinator.py'; sleep 2; cd {ORCH_DIR} && python3 -c \\\"import subprocess; subprocess.Popen(['python3','coordinator.py'], cwd='{ORCH_DIR}', stdout=open('/dev/null','w'), stderr=open('/dev/null','w'), start_new_session=True)\\\"",
+            "risk": "medium",
+            "backup_before": True,
+            "phase_required": "phase3",
         }
     return None
 
@@ -944,6 +1004,7 @@ def run():
     # Run all detectors
     detectors = [
         detect_coordinator_dead,
+        detect_stale_config,  # NEW: restart if config.yaml newer than coordinator process
         lambda: detect_stale_heartbeats(workers_data),
         lambda: detect_permanent_failures(queue_data),
         lambda: detect_worker_failed_status(),  # NEW: workers stuck in failed phase
