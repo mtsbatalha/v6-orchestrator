@@ -178,16 +178,24 @@ def scan_source_via_ssh(worker_name, worker_cfg, source, logger):
             logger.debug(f"  scan {worker_name}/{source['name']}/{folder}: rc={rc} {err[:100]}")
             continue
 
-        # Parse JSON lines
-        for line in out.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        # Parse rclone JSON output (array or JSON-lines)
+        entries = []
+        try:
+            entries = json.loads(out)
+            if isinstance(entries, dict):
+                entries = [entries]
+        except json.JSONDecodeError:
+            # Fallback: JSON-lines format (older rclone versions)
+            for line in out.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
 
+        for entry in entries:
             size = entry.get("size", 0) or 0
             name = entry.get("name", "") or entry.get("Path", "")
             if not name:
@@ -264,15 +272,24 @@ def scan_all_sources(cfg, logger):
                 # Group files by their parent directory (movie folder)
                 movie_dirs = defaultdict(lambda: {"size": 0, "files": []})
 
-                for line in out.strip().split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                # Parse rclone JSON output (array or JSON-lines)
+                entries = []
+                try:
+                    entries = json.loads(out)
+                    if isinstance(entries, dict):
+                        entries = [entries]
+                except json.JSONDecodeError:
+                    # Fallback: JSON-lines format (older rclone versions)
+                    for line in out.strip().split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
 
+                for entry in entries:
                     size = entry.get("Size", 0) or entry.get("size", 0) or 0
                     path = entry.get("Path", "") or entry.get("name", "") or entry.get("path", "")
                     if not path:
