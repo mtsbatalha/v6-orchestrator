@@ -126,7 +126,7 @@ DEFAULT_PATTERNS = {
         "match": {"type": "disk_critical"},
         "action": {
             "description": "Limpar arquivos temporários e falhas no worker",
-            "command": "ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 root@{host} 'find /opt/v6-converter/falhas/ -type f -mtime +7 -delete 2>/dev/null; find /opt/v6-converter/temp/ -name \"*.tmp\" -delete 2>/dev/null; du -sh /opt/v6-converter/falhas /opt/v6-converter/temp /opt/v6-converter/conversions 2>/dev/null'",
+            "command": "ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 root@{host} 'find /opt/v6-converter/falhas/ -type f -mtime +7 -delete 2>/dev/null; find /opt/v6-converter/temp/ -name \"*.tmp\" -delete 2>/dev/null; du -sh /opt/v6-converter/falhas /opt/v6-converter/temp /opt/v6-converter/conversions 2>/dev/null || true'",
             "risk": "low",
         },
         "times_matched": 0,
