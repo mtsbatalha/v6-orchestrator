@@ -1,0 +1,17 @@
+# Data files
+queue.json
+queue.json.bak*
+queue.json.lock
+history.json
+workers.json
+
+# Logs
+logs/
+
+# Backups
+*.bak*
+*.bak.auto*
+
+# Python
+__pycache__/
+*.pyc

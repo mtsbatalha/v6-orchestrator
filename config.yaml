@@ -1,0 +1,170 @@
+coordinator:
+  queue_path: /opt/v6-orchestrator/queue.json
+  workers_path: /opt/v6-orchestrator/workers.json
+  log_path: /opt/v6-orchestrator/logs/coordinator.log
+  scan_interval_seconds: 1800
+  heartbeat_timeout_seconds: 300
+  max_retries: 3
+  archive_after_days: 7
+  report_interval_seconds: 300
+  http_api_port: 8765
+encode_defaults:
+  min_size_gb: 20
+  disk_cleanup_pct: 85
+  audio_copy: true
+  subtitle_copy: true
+encode_profiles:
+  vaapi_1080p_sdr: &id003
+    codec: h264_vaapi
+    format: nv12
+    mode: qp
+    qp: 22
+    target_gb: 7
+  vaapi_2160p_hdr: &id004
+    codec: hevc_vaapi
+    format: nv12
+    mode: qp
+    qp: 26
+    target_gb: 14
+  nvenc_1080p_sdr: &id001
+    codec: hevc_nvenc
+    format: nv12
+    mode: cq
+    cq: 22
+    target_gb: 7
+  nvenc_2160p_hdr: &id002
+    codec: hevc_nvenc
+    format: nv12
+    mode: cq
+    cq: 26
+    target_gb: 14
+scheduler:
+  priority_rules:
+  - pattern: IMAX
+    priority: high
+  - pattern: 4K
+    priority: high
+  - pattern: BluRay
+    priority: normal
+  - pattern: WEB-DL
+    priority: low
+  schedule_windows:
+  - name: night
+    start: '22:00'
+    end: 06:00
+    enabled: true
+  - name: day
+    start: 06:00
+    end: '22:00'
+    enabled: true
+  filters:
+    min_size_gb: 20
+    exclude_patterns:
+    - trailer
+    - sample
+    include_patterns: []
+sources:
+- name: seedbox-pve21
+  remote: seedbox
+  type: webdav
+  folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+- name: seedbox-pve7
+  remote: pve7-webdav
+  type: webdav
+  folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  - ANIMES - LEGENDADOS - REMUX
+  - FILMES BDR - DUBLADOS
+  - FILMES BDR - LEGENDADOS
+- name: gorilla-pve7-smb
+  remote: pve7-smb:/mnt/internal
+  type: local
+  canonical_source: seedbox-pve7
+  folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  - FILMES BDR - DUBLADOS
+  - FILMES BDR - LEGENDADOS
+- name: gorilla-pve21-smb
+  remote: pve21-smb:/mnt/hostdzire-pve21
+  type: local
+  canonical_source: seedbox-pve21
+  folders:
+  - FILMES - DUBLADOS - REMUX
+  - FILMES LEGENDADOS - REMUX
+  - FILMES BDR - DUBLADOS
+  - FILMES BDR - LEGENDADOS
+workers:
+  solidvps:
+    host: 38.70.138.179
+    ssh_port: 22
+    ssh_user: root
+    ssh_pass: 9T7b$3zl&Ih$z_
+    gpu: p1000
+    encoder: nvenc
+    workdir: /opt/v6-orchestrator
+    temp_dir: /opt/v6-converter/temp
+    conv_dir: /opt/v6-converter/conversions
+    upload_dest_remote: seedbox
+    upload_dest_base: conversoes_solidvps
+    source_remotes:
+      seedbox-pve21: seedbox
+      seedbox-pve7: pve7-webdav
+    profiles:
+      1080p_sdr: *id001
+      2160p_hdr: *id002
+  gorilla:
+    host: 104.250.135.122
+    ssh_port: 22
+    ssh_user: root
+    ssh_pass: SVg1BHDvlqY0oX3Q
+    gpu: uhd-p630
+    encoder: vaapi
+    workdir: /opt/v6-orchestrator
+    temp_dir: /opt/v6-converter/temp
+    conv_dir: /opt/v6-converter/conversions
+    upload_dest_remote: /mnt/internal
+    upload_dest_base: conversoes_gorilla
+    source_remotes:
+      gorilla-pve7-smb: /mnt/internal
+      gorilla-pve21-smb: /mnt/hostdzire-pve21
+      seedbox-pve7: pve7-webdav
+      seedbox-pve21: pve21-webdav
+    profiles: &id005
+      1080p_sdr: *id003
+      2160p_hdr: *id004
+  pve14:
+    host: 152.228.132.75
+    ssh_port: 22
+    ssh_user: root
+    ssh_pass: Q0e2WIcdwmdMo0wk
+    gpu: xeon-e2288g
+    encoder: vaapi
+    workdir: /opt/v6-orchestrator
+    temp_dir: /opt/v6-converter/temp
+    conv_dir: /opt/v6-converter/conversions
+    upload_dest_remote: /mnt/internal
+    upload_dest_base: conversoes_pve14
+    source_remotes:
+      seedbox-pve21: seedbox-pve21
+      seedbox-pve7: seedbox-pve7
+    profiles: *id005
+  pve24:
+    host: 51.210.32.216
+    ssh_port: 22
+    ssh_user: root
+    ssh_pass: 9NRKsXBxWlwEq1Sx
+    gpu: uhd-p630
+    encoder: vaapi
+    workdir: /opt/v6-orchestrator
+    temp_dir: /opt/v6-converter/temp
+    conv_dir: /opt/v6-converter/conversions
+    upload_dest_remote: gorilla
+    upload_dest_base: conversoes_pve24
+    source_remotes:
+      seedbox-pve21: seedbox-pve21
+      seedbox-pve7: seedbox-pve7
+    profiles: *id005
