@@ -159,15 +159,26 @@ DEFAULT_PATTERNS = {
 
 
 def load_patterns():
-    """Load pattern registry, seeded with defaults."""
+    """Load pattern registry, seeded with defaults.
+    Always prefers code defaults over disk when disk has known-broken templates."""
     if os.path.exists(PATTERN_REGISTRY_PATH):
         try:
             with open(PATTERN_REGISTRY_PATH) as f:
                 patterns = json.load(f)
-            # Merge with defaults (add any new defaults not already in registry)
+            # Merge with defaults: add new keys + fix known broken patterns
             for key, default in DEFAULT_PATTERNS.items():
                 if key not in patterns:
                     patterns[key] = default
+                else:
+                    # Always use code's command if disk version has known broken templates
+                    disk_cmd = patterns[key].get("action", {}).get("command", "")
+                    if "{{" in disk_cmd and key != "download_retry_loop":
+                        # Known bug: disk_critical had {{falhas,temp,conversions}}
+                        patterns[key] = default
+                    elif disk_cmd == default.get("action", {}).get("command", ""):
+                        pass  # Same, no update needed
+                    elif "falhas,temp,conversions" in disk_cmd:
+                        patterns[key] = default  # Fix broken template
             return patterns
         except (json.JSONDecodeError, OSError):
             pass
