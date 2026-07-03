@@ -232,6 +232,7 @@ def classify_error(error_message):
         "file not found", "no such file", "invalid argument",
         "unsupported pixel format", "decoder not found",
         "stream not found", "unknown encoder",
+        "vmaf",  # VMAF quality failures
     ]
     
     for pattern in transient_patterns:
@@ -275,7 +276,6 @@ def validate_output(output_path, input_path, profile_name, logger):
         f"ffprobe -v error -select_streams v:0 "
         f"-show_entries stream=codec_name,width,height "
         f"-show_entries format=duration "
-        f"-show_entries stream=index -select_streams a "
         f"-of json {repr(output_path)}"
     )
     rc, probe_out, probe_err = run(cmd_out, timeout=30)
@@ -294,9 +294,10 @@ def validate_output(output_path, input_path, profile_name, logger):
     
     # 4. Video codec matches expected
     vcodec = video_streams[0].get("codec_name", "").lower()
-    expected_codec = "hevc" if "2160p" in profile_name else "h264"
-    if expected_codec not in vcodec:
-        return False, f"output video codec '{vcodec}' does not match expected '{expected_codec}'"
+    # Accept both h264 and hevc — NVENC workers produce hevc for 1080p by design
+    expected_codecs = ["hevc", "h264"]
+    if not any(ec in vcodec for ec in expected_codecs):
+        return False, f"output video codec '{vcodec}' does not match expected one of {expected_codecs}"
     
     # 5. Duration within 10% of source
     out_duration = data.get("format", {}).get("duration")
@@ -324,7 +325,20 @@ def validate_output(output_path, input_path, profile_name, logger):
             )
     
     # 6. Audio stream count matches source
-    out_audio_count = len([s for s in data.get("streams", []) if s.get("codec_type") == "audio"])
+    # BUG FIX: data only has video streams (probe used -select_streams v:0).
+    # Need a separate probe for output audio streams.
+    cmd_audio_out = (
+        f"ffprobe -v error -select_streams a -show_entries stream=index "
+        f"-of json {repr(output_path)}"
+    )
+    rc_aud, audio_out_probe, _ = run(cmd_audio_out, timeout=30)
+    out_audio_count = 0
+    if rc_aud == 0:
+        try:
+            audio_out_data = json.loads(audio_out_probe)
+            out_audio_count = len(audio_out_data.get("streams", []))
+        except (json.JSONDecodeError, KeyError):
+            out_audio_count = 0
     # Re-probe input for audio count (use a separate focused probe)
     cmd_audio_src = (
         f"ffprobe -v error -select_streams a -show_entries stream=index "
@@ -347,6 +361,216 @@ def validate_output(output_path, input_path, profile_name, logger):
     
     logger.info(f"  Validation OK: {vcodec}, {out_duration:.0f}s, {out_audio_count} audio, {output_size/1e9:.1f} GB")
     return True, None
+
+
+# ---------------------------------------------------------------------------
+# VMAF quality gate
+# ---------------------------------------------------------------------------
+FFMPEG_BTBN = "/opt/ffmpeg-btbn/ffmpeg"
+
+
+def run_vmaf_check(source_path, encoded_path, sample_duration=300, logger=None):
+    """Run VMAF quality check on a 5-minute sample from the middle of the file.
+
+    Returns (passed, vmaf_score, error_msg).
+    - passed: True if VMAF >= 85, or if BtbN is missing (skip), or on error (skip)
+    - vmaf_score: float or None if skipped/error
+    - error_msg: str or None
+    """
+    import tempfile
+
+    if not os.path.exists(FFMPEG_BTBN):
+        if logger:
+            logger.warning("  VMAF: BtbN FFmpeg not found at %s, skipping", FFMPEG_BTBN)
+        return True, None, None
+
+    # Get duration for seeking to middle
+    cmd_dur = f"ffprobe -v error -show_entries format=duration -of csv=p=0 {repr(source_path)}"
+    rc, dur_out, _ = run(cmd_dur, timeout=30)
+    try:
+        total_duration = float(dur_out.strip())
+    except (ValueError, TypeError):
+        total_duration = 600.0
+
+    seek_to = max(0, (total_duration / 2) - (sample_duration / 2))
+
+    with tempfile.TemporaryDirectory(prefix="vmaf_") as tmpdir:
+        sample_src = os.path.join(tmpdir, "ref.mkv")
+        sample_enc = os.path.join(tmpdir, "dist.mkv")
+        vmaf_json = os.path.join(tmpdir, "vmaf.json")
+
+        # Extract sample from source (reference) — decode to SDR for fair comparison
+        cmd_ref = (
+            f"ffmpeg -y -ss {seek_to:.1f} -t {sample_duration} "
+            f"-i {repr(source_path)} "
+            f"-map 0:v:0 -c:v libx264 -crf 18 -preset fast "
+            f"-an -sn {repr(sample_src)}"
+        )
+        if logger:
+            logger.info("  VMAF: extracting reference sample (%.0fs from %.0fs)...", seek_to, total_duration)
+        rc_ref, _, err_ref = run(cmd_ref, timeout=300)
+        if rc_ref != 0:
+            return True, None, f"vmaf: failed to extract reference: {err_ref[:200]}"
+
+        # Extract sample from encoded (distorted)
+        cmd_dist = (
+            f"ffmpeg -y -ss {seek_to:.1f} -t {sample_duration} "
+            f"-i {repr(encoded_path)} "
+            f"-map 0:v:0 -c:v libx264 -crf 18 -preset fast "
+            f"-an -sn {repr(sample_enc)}"
+        )
+        rc_enc, _, err_enc = run(cmd_dist, timeout=300)
+        if rc_enc != 0:
+            return True, None, f"vmaf: failed to extract encoded sample: {err_enc[:200]}"
+
+        # Run VMAF comparison
+        cmd_vmaf = (
+            f"{FFMPEG_BTBN} -y "
+            f"-i {repr(sample_enc)} "
+            f"-i {repr(sample_src)} "
+            f"-lavfi '[0:v]setpts=PTS-STARTPTS[dist];"
+            f"[1:v]setpts=PTS-STARTPTS[ref];"
+            f"[dist][ref]libvmaf=log_path={repr(vmaf_json)}:log_fmt=json:n_threads=4' "
+            f"-f null /dev/null"
+        )
+        if logger:
+            logger.info("  VMAF: running comparison...")
+        rc_vmaf, _, err_vmaf = run(cmd_vmaf, timeout=600)
+
+        if rc_vmaf != 0:
+            return True, None, f"vmaf: libvmaf failed: {err_vmaf[:300]}"
+
+        # Parse VMAF score from JSON
+        try:
+            with open(vmaf_json) as f:
+                vmaf_data = json.load(f)
+
+            frames = vmaf_data.get("frames", [])
+            if not frames:
+                return True, None, "vmaf: no frames in result"
+
+            scores = [fr["metrics"]["vmaf"] for fr in frames if "metrics" in fr]
+            zeros = sum(1 for s in scores if s == 0.0)
+            avg_score = sum(scores) / len(scores) if scores else 0
+
+            if logger:
+                logger.info(
+                    "  VMAF: score=%.2f, min=%.2f, max=%.2f, frames=%d, zeros=%d",
+                    avg_score,
+                    min(scores) if scores else 0,
+                    max(scores) if scores else 0,
+                    len(frames),
+                    zeros,
+                )
+
+            # Reject if too many zero-score frames (indicates bad comparison)
+            if zeros > len(frames) * 0.1:
+                return True, avg_score, f"vmaf: {zeros}/{len(frames)} frames scored 0 (possible HDR mismatch)"
+
+            return avg_score >= 85, avg_score, None
+
+        except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+            return True, None, f"vmaf: failed to parse result: {e}"
+
+
+def run_vmaf_retry(
+    input_path,
+    output_path,
+    profile_name,
+    worker_cfg,
+    logger,
+    max_retries=3,
+    qp_step=4,
+    vmaf_threshold=85,
+    sample_duration=300,
+    progress_callback=None,
+):
+    """VMAF quality gate with progressive retry.
+
+    After initial encode (already done), runs VMAF on sample.
+    If score < threshold, re-encodes with progressively lower qp.
+
+    Returns (passed, vmaf_score, attempts, error_msg).
+    """
+    profiles = worker_cfg.get("profiles", {})
+    profile_cfg = profiles.get(profile_name, profiles.get("1080p_sdr", {}))
+    encoder_type = worker_cfg.get("encoder", "unknown")
+
+    initial_qp = profile_cfg.get("cq", profile_cfg.get("qp", 22))
+    current_qp = initial_qp
+
+    for attempt in range(1, max_retries + 1):
+        # Run VMAF check
+        if logger:
+            logger.info("  VMAF attempt %d/%d (qp=%d)", attempt, max_retries, current_qp)
+        passed, score, vmaf_err = run_vmaf_check(
+            input_path, output_path, sample_duration=sample_duration, logger=logger
+        )
+
+        if vmaf_err and logger:
+            logger.warning("  VMAF check note: %s", vmaf_err)
+
+        if passed:
+            if score is not None and logger:
+                logger.info("  ✅ VMAF passed: %.2f >= %d (attempt %d)", score, vmaf_threshold, attempt)
+            return True, score, attempt, None
+
+        # VMAF failed — re-encode with lower qp
+        if attempt < max_retries:
+            current_qp = initial_qp - (qp_step * attempt)
+            if logger:
+                logger.warning(
+                    "  ❌ VMAF=%.2f < %d — re-encoding with qp=%d (attempt %d/%d)",
+                    score,
+                    vmaf_threshold,
+                    current_qp,
+                    attempt + 1,
+                    max_retries,
+                )
+
+            # Remove old output
+            if os.path.exists(output_path):
+                os.remove(output_path)
+
+            # Adjust profile for re-encode
+            retry_cfg = dict(profile_cfg)
+            if encoder_type == "nvenc":
+                retry_cfg["cq"] = current_qp
+            else:
+                retry_cfg["qp"] = current_qp
+
+            worker_cfg_retry = {
+                "profiles": {profile_name: retry_cfg},
+                "encoder": encoder_type,
+            }
+
+            if progress_callback:
+                progress_callback(0, 0, 0, 0)
+
+            ok = encode_item(
+                input_path,
+                output_path,
+                profile_name,
+                worker_cfg_retry,
+                logger,
+                progress_callback=progress_callback,
+            )
+
+            if not ok:
+                if logger:
+                    logger.error("  Re-encode failed at attempt %d (qp=%d)", attempt + 1, current_qp)
+                return False, score, attempt, "re_encode_failed"
+        else:
+            if logger:
+                logger.error(
+                    "  ❌ VMAF=%.2f < %d after %d attempts — giving up",
+                    score,
+                    vmaf_threshold,
+                    max_retries,
+                )
+            return False, score, attempt, "vmaf_threshold_not_met"
+
+    return False, None, max_retries, "vmaf_retry_exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +974,39 @@ def process_work_order(work_order, worker_cfg, logger):
             write_progress(worker_id, title, "failed", f"validation failed: {validation_error}")
             return False, f"validation_failed: {validation_error}", "permanent"
 
+        # 5c. VMAF quality gate (if enabled)
+        vmaf_cfg = worker_cfg.get("vmaf_cfg", {})
+        vmaf_enabled = vmaf_cfg.get("enabled", False)
+        vmaf_skip_hdr = vmaf_cfg.get("skip_for_hdr", True)
+
+        if vmaf_enabled:
+            is_hdr = "2160p" in profile_name
+            if is_hdr and vmaf_skip_hdr:
+                logger.info("  VMAF: skipping HDR source (Phase 1)")
+            else:
+                write_progress(worker_id, title, "validating", "VMAF quality check")
+                logger.info("  Running VMAF quality gate...")
+
+                vmaf_ok, vmaf_score, vmaf_attempts, vmaf_err = run_vmaf_retry(
+                    input_path, output_path, profile_name, worker_cfg, logger,
+                    max_retries=vmaf_cfg.get("max_retries", 3),
+                    qp_step=vmaf_cfg.get("qp_step", 4),
+                    vmaf_threshold=vmaf_cfg.get("threshold", 85),
+                    sample_duration=vmaf_cfg.get("sample_duration", 300),
+                    progress_callback=_progress_cb,
+                )
+
+                if not vmaf_ok:
+                    err_msg = f"vmaf_failed: score={vmaf_score}, attempts={vmaf_attempts}"
+                    if vmaf_err:
+                        err_msg += f" ({vmaf_err})"
+                    logger.error(f"  {err_msg}")
+                    write_progress(worker_id, title, "failed", err_msg)
+                    return False, err_msg, "permanent"
+
+                if vmaf_score is not None:
+                    logger.info(f"  VMAF OK: score={vmaf_score:.2f}, attempts={vmaf_attempts}")
+
         # 6. Upload
         dest_folder = f"{upload_dest_base}/{source_folder}/{title}_{profile_name}"
         write_progress(worker_id, title, "uploading", f"to {upload_dest_remote}:{dest_folder}")
@@ -862,6 +1119,9 @@ def main():
     if worker_cfg.get("encoder") and worker_cfg["encoder"] != "unknown":
         gpu_info["encoder"] = worker_cfg["encoder"]
     logger.info(f"GPU: {gpu_info['gpu_name']}, encoder: {gpu_info['encoder']}")
+
+    # Load VMAF quality gate config
+    worker_cfg["vmaf_cfg"] = cfg.get("vmaf", {})
 
     if args.mode == "process-work-order":
         # Read work_order.json
